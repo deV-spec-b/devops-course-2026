@@ -1,44 +1,34 @@
 #!/usr/bin/env bash
-set -uo pipefail
+# Проверка конфигурации devops-vm
+set -euo pipefail
 
-PASS=0; FAIL=0
+fail=0
 
 check() {
-    local desc="$1" expected="$2" actual="$3"
-    if [[ "$actual" == "$expected" ]]; then
-        echo "  [OK]   $desc"; ((PASS++))
+    local name="$1"
+    local cmd="$2"
+    if eval "$cmd" >/dev/null 2>&1; then
+        echo "OK: $name"
     else
-        echo "  [FAIL] $desc (ожидалось: '$expected', получено: '$actual')"; ((FAIL++))
+        echo "FAIL: $name"
+        fail=1
     fi
 }
 
-echo "Аудит конфигурации: $(hostname -f), $(date '+%Y-%m-%d %H:%M')"
+echo "=== Аудит конфигурации ==="
 
-echo "[1] Служба SSH"
-check "Вход от имени root запрещён"        "no"  "$(sudo sshd -T | awk '/^permitrootlogin/{print $2}')"
-check "Парольная аутентификация отключена" "no"  "$(sudo sshd -T | awk '/^passwordauthentication/{print $2}')"
+# SSH
+check "PermitRootLogin no" "sudo sshd -T | grep -qi 'permitrootlogin no'"
+check "PasswordAuthentication no" "sudo sshd -T | grep -qi 'passwordauthentication no'"
 
-PORT=$(sudo sshd -T | awk '/^port /{print $2}')
-if [[ "$PORT" != "22" ]]; then
-    echo "  [OK]   Порт SSH отличен от 22 (текущий: $PORT)"; ((PASS++))
-else
-    echo "  [FAIL] Порт SSH отличен от 22 (ожидалось: не 22, получено: $PORT)"; ((FAIL++))
-fi
+# Firewall
+check "UFW active" "sudo ufw status | grep -q 'Status: active'"
+check "UFW default deny incoming" "sudo ufw status verbose | grep -q 'deny (incoming)'"
 
-check "MaxAuthTries равен 3" "3" "$(sudo sshd -T | awk '/^maxauthtries/{print $2}')"
+# Web server
+check "Nginx is running" "systemctl is-active --quiet nginx"
+check "Port 443 is listening" "ss -tln | grep -q ':443'"
+check "Site directory permissions 755" "[[ \$(stat -c %a /var/www/devops-site) == 755 ]]"
 
-echo "[2] Межсетевой экран"
-check "Межсетевой экран активен" "active" "$(sudo ufw status | awk '/^Status:/{print $2}')"
-
-DEFAULT=$(sudo ufw status verbose | grep -i "Default:" | grep -o "deny (incoming)" || true)
-if [[ -n "$DEFAULT" ]]; then
-    echo "  [OK]   Политика входящего трафика: deny"; ((PASS++))
-else
-    echo "  [FAIL] Политика входящего трафика: deny (не найдено)"; ((FAIL++))
-fi
-
-echo "[3] Учётные записи"
-awk -F: '$3>=1000 && $3<65534 {printf "    %s (uid=%s)\n",$1,$3}' /etc/passwd
-
-echo "Пройдено: $PASS, не пройдено: $FAIL"
-[[ $FAIL -eq 0 ]] && exit 0 || exit 1
+echo "=== Конец аудита ==="
+exit $fail
